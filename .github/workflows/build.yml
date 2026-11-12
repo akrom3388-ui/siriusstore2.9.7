@@ -1,0 +1,66 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Accept Android licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Create Android project
+        run: npx cap add android
+
+      - name: Patch manifest, native code, gradle
+        run: python3 scripts/patch_android.py
+
+      - name: Sync web assets
+        run: npx cap sync android
+
+      - name: Use fixed signing key
+        run: |
+          mkdir -p ~/.android
+          cp signing/debug.keystore ~/.android/debug.keystore
+
+      - name: Build APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Check signing fingerprint
+        run: |
+          APKSIGNER=$(ls -d $ANDROID_HOME/build-tools/*/apksigner | sort -V | tail -1)
+          OUT=$($APKSIGNER verify --print-certs android/app/build/outputs/apk/debug/app-debug.apk | grep "SHA-256" | head -1 || true)
+          echo "$OUT"
+          EXPECT="b05c3696e1e95df119e90f9a3f638ac2e29fb36f8ae6ee46f01aa4f14a105431"
+          {
+            echo "### Imzo (signing)"
+            echo "$OUT"
+            if [ -z "$OUT" ]; then echo "Imzoni o'qib bo'lmadi (tekshiruv o'tkazib yuborildi)"; elif echo "$OUT" | grep -qi "$EXPECT"; then echo "OK: belgilangan kalit bilan imzolangan - yangilanish eski ilova ustiga o'rnatiladi"; else echo "XATO: kalit boshqacha - bu APK eski ilova ustiga o'rnatilmaydi"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$OUT" ] && ! echo "$OUT" | grep -qi "$EXPECT"; then echo "XATO: APK belgilangan kalit bilan imzolanmagan"; exit 1; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SIRIUS-STORE-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 60
